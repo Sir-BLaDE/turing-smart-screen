@@ -31,6 +31,17 @@ check_python_version()
 
 import os
 import sys
+from pathlib import Path
+
+# Asegurar directorio de trabajo correcto (doble clic / accesos directos / empaquetado)
+try:
+    if getattr(sys, 'frozen', False):
+        _app_dir = Path(sys.executable).resolve().parent
+    else:
+        _app_dir = Path(__file__).resolve().parent
+    os.chdir(_app_dir)
+except Exception:
+    pass
 
 try:
     import argparse
@@ -39,8 +50,8 @@ try:
     import platform
     import signal
     import subprocess
+    import threading
     import time
-    from pathlib import Path
     from PIL import Image
 
     if platform.system() == 'Windows':
@@ -91,8 +102,18 @@ if __name__ == "__main__":
         logger.debug("(Waited %.1fs)" % wait_time)
 
     def clean_stop(tray_icon=None):
-        # Turn screen and LEDs off before stopping
-        display.turn_off()
+        # Señalar el apagado ANTES de tocar la pantalla: así los reintentos
+        # infinitos de reconexión no bloquean la salida si el USB está desenchufado.
+        try:
+            display.lcd.begin_shutdown()
+        except Exception:
+            pass
+
+        # Turn screen and LEDs off before stopping (best-effort if disconnected)
+        try:
+            display.turn_off()
+        except Exception as e:
+            logger.debug("No se pudo apagar la pantalla al salir: %s", e)
 
         # Do not stop the program now in case data transmission was in progress
         # Instead, ask the scheduler to empty the action queue before stopping
@@ -170,20 +191,50 @@ if __name__ == "__main__":
                 logger.info("Program will now exit")
                 clean_stop()
 
-    # Create a tray icon for the program, with an Exit entry in menu
+    # Create a tray icon for the program, with connection status and actions
+    try:
+        import library.connection_status as connection_status
+    except Exception:
+        connection_status = None
+
+    # Latido independiente del icono de bandeja: el configurador necesita saber
+    # si el monitor sigue vivo aunque pystray no esté disponible.
+    if connection_status:
+        def _status_heartbeat():
+            while not scheduler.STOPPING:
+                try:
+                    connection_status.touch()
+                except Exception:
+                    pass
+                time.sleep(5)
+
+        threading.Thread(target=_status_heartbeat, name="StatusHeartbeat", daemon=True).start()
+
+    def _tray_status_text(item=None):
+        if connection_status:
+            try:
+                s = connection_status.get_status()
+                if s.get("connected"):
+                    return "Estado: Conectado"
+                if s.get("reconnecting"):
+                    return "Estado: Reconectando..."
+                msg = s.get("message") or "Desconectado"
+                return f"Estado: {msg}"
+            except Exception:
+                pass
+        return "Estado: Desconocido"
+
     try:
         tray_icon = pystray.Icon(
             name='Turing System Monitor',
             title='Turing System Monitor',
             icon=Image.open(MAIN_DIRECTORY / "res/icons/monitor-icon-17865/64.png"),
             menu=pystray.Menu(
-                pystray.MenuItem(
-                    text='Configure',
-                    action=on_configure_tray),
+                pystray.MenuItem(lambda item: _tray_status_text(item), None, enabled=False),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem(
-                    text='Exit',
-                    action=on_exit_tray)
+                pystray.MenuItem('Configurar', on_configure_tray),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem('Salir', on_exit_tray),
             )
         )
 
@@ -191,9 +242,36 @@ if __name__ == "__main__":
         if platform.system() != "Darwin":
             tray_icon.run_detached()
             logger.info("Tray icon has been displayed")
-    except:
+
+        # Actualizar título del icono periódicamente con estado de conexión
+        if connection_status and tray_icon:
+            def _update_tray_status():
+                last = None
+                while not scheduler.STOPPING:
+                    try:
+                        s = connection_status.get_status()
+                        if s.get("connected"):
+                            text = "Turing System Monitor - Conectado"
+                        elif s.get("reconnecting"):
+                            text = "Turing System Monitor - Reconectando..."
+                        else:
+                            msg = s.get("message") or "Desconectado"
+                            text = f"Turing System Monitor - {msg}"
+                        if text != last:
+                            tray_icon.title = text
+                            try:
+                                tray_icon.update_menu()
+                            except Exception:
+                                pass
+                            last = text
+                    except Exception:
+                        pass
+                    time.sleep(1)
+
+            threading.Thread(target=_update_tray_status, name="TrayStatus", daemon=True).start()
+    except Exception as e:
         tray_icon = None
-        logger.warning("Tray icon is not supported on your platform")
+        logger.warning("Tray icon is not supported on your platform: %s", e)
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="Turing System Monitor")

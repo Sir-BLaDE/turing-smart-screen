@@ -1,0 +1,20 @@
+{
+  "available_designs": {
+    "mazinger_anime_classic": {
+      "label": "Mazinger Z Anime Classic",
+      "description": "Robot clásico azul metálico con escudo dorado, estilo anime Mazinger Z",
+      "filename": "mazinger_anime_option1.png",
+      "sprite_size": "256 256",
+      "colors": "@{body=#1E90FF; shield=#FFD700; visor=#FF1E00}"
+    },
+    "mazinger_vector_modern": {
+      "label": "Mazinger Z Vector Modern",
+      "description": "Diseño vector minimalista moderno, flat design clean",
+      "filename": "mazinger_vector_option3.png",
+      "sprite_size": "128 128",
+      "colors": "@{body=#007FFF; shield=#FFCC00; visor=#FFFFFF}"
+    }
+  },
+  "active_design_id": "mazinger_anime_classic",
+  "version": "1.0"
+}

@@ -56,7 +56,11 @@ if HW_SENSORS == "PYTHON":
     import library.sensors.sensors_python as sensors
 elif HW_SENSORS == "LHM":
     if platform.system() == 'Windows':
-        import library.sensors.sensors_librehardwaremonitor as sensors
+        try:
+            import library.sensors.sensors_librehardwaremonitor as sensors
+        except Exception as e:
+            logger.error("No se pudo inicializar LibreHardwareMonitor: %s", e)
+            raise
     else:
         logger.error("LibreHardwareMonitor integration is only available on Windows")
         try:
@@ -71,7 +75,23 @@ elif HW_SENSORS == "STATIC":
     import library.sensors.sensors_stub_static as sensors
 elif HW_SENSORS == "AUTO":
     if platform.system() == 'Windows':
-        import library.sensors.sensors_librehardwaremonitor as sensors
+        is_admin = False
+        try:
+            import ctypes
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            is_admin = False
+
+        if is_admin:
+            try:
+                import library.sensors.sensors_librehardwaremonitor as sensors
+            except Exception as e:
+                logger.warning("LibreHardwareMonitor no disponible (%s). Usando sensores Python como alternativa.", e)
+                import library.sensors.sensors_python as sensors
+        else:
+            # Sin admin: usar Python directamente para evitar popups/requisitos de LHM
+            logger.info("Ejecutando sin permisos de administrador: usando sensores Python (HW_SENSORS=AUTO).")
+            import library.sensors.sensors_python as sensors
     else:
         import library.sensors.sensors_python as sensors
 else:

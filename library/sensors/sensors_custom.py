@@ -99,3 +99,5 @@ class ExampleCustomTextOnlyData(CustomDataSource):
     def last_values(self) -> List[float]:
         # If a custom data class only has text values, it won't be possible to display line graph
         pass
+
+from library.sensors.sensors_gamehud import *  # GAMEHUD

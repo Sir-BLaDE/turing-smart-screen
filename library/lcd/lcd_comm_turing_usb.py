@@ -25,6 +25,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
@@ -37,6 +38,34 @@ from PIL import Image
 
 from library.lcd.lcd_comm import Orientation, LcdComm
 from library.log import logger
+try:
+    import library.connection_status as connection_status
+except Exception:
+    connection_status = None
+
+
+def _set_conn_status(connected=None, reconnecting=None, message=None):
+    try:
+        if connection_status:
+            connection_status.set_status(connected=connected, reconnecting=reconnecting, message=message)
+    except Exception:
+        pass
+
+
+def _rescan_usb_devices(stop_event=None):
+    if stop_event is not None and stop_event.is_set():
+        return
+    if platform.system() == "Windows":
+        try:
+            subprocess.run(
+                ["pnputil", "/scan-devices"],
+                capture_output=True,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            logger.info("TUR_USB: solicitado re-enumerar dispositivos USB (pnputil)")
+        except Exception as e:
+            logger.debug("TUR_USB: no se pudo re-enumerar USB: %s", e)
 
 VENDOR_ID = 0x1cbe
 
@@ -462,37 +491,38 @@ def encrypt_command_packet(data: bytearray) -> bytearray:
 def find_usb_device():
     dev = None
     dev_pid = None
+    last_backend_error = None
     for pid in PRODUCT_ID.keys():
         try:
             dev = usb.core.find(idVendor=VENDOR_ID, idProduct=pid)
         except usb.core.NoBackendError as e:
-            print("""[ERROR] %s: libusb could not be loaded from your system. Make sure it is installed.
-On Linux and BSD, these will generally be available on the distribution's official repositories.
-On macOS, libusb 1.0 can easily be installed through Homebrew: brew install libusb
-On Windows, manually copy 'external/libusb-1.0/libusb-1.0.dll' to C:\\Windows\\System32""" % str(
-                e))
-            try:
-                sys.exit(0)
-            except:
-                os._exit(0)
+            last_backend_error = e
+            logger.error(
+                "libusb no disponible: %s. En Windows, copia 'external/libusb-1.0/libusb-1.0.dll' a C:\\Windows\\System32 si es necesario.",
+                e,
+            )
+            raise
+        except Exception as e:
+            logger.debug("TUR_USB: error buscando dispositivo USB pid=%s: %s", pid, e)
+            dev = None
 
         dev_pid = pid
         if dev is not None:
             break
     if dev is None:
-        raise ValueError(f'USB device not found')
+        raise ValueError('USB device not found')
 
     try:
         dev.set_configuration()
     except usb.core.USBError as e:
-        print("Warning: set_configuration() failed:", e)
+        logger.warning("TUR_USB: set_configuration() falló: %s", e)
 
     if platform.system() == "Linux":
         try:
             if dev.is_kernel_driver_active(0):
                 dev.detach_kernel_driver(0)
         except usb.core.USBError as e:
-            print("Warning: detach_kernel_driver failed:", e)
+            logger.warning("TUR_USB: detach_kernel_driver falló: %s", e)
 
     return dev, dev_pid
 
@@ -513,6 +543,8 @@ def read_flush(ep_in, max_attempts=5):
 
 
 def write_to_device(dev, data, timeout=2000):
+    if dev is None:
+        raise RuntimeError("USB device not available")
     cfg = dev.get_active_configuration()
     intf = usb.util.find_descriptor(cfg, bInterfaceNumber=0)
     if intf is None:
@@ -521,21 +553,22 @@ def write_to_device(dev, data, timeout=2000):
         e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
     ep_in = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(
         e.bEndpointAddress) == usb.util.ENDPOINT_IN)
-    assert ep_out is not None and ep_in is not None, "Could not find USB endpoints"
+    if ep_out is None or ep_in is None:
+        raise RuntimeError("Could not find USB endpoints")
 
     try:
         ep_out.write(data, timeout)
     except usb.core.USBError as e:
-        print("USB write error:", e)
-        return None
+        logger.debug("USB write error: %s", e)
+        raise
 
     try:
         response = ep_in.read(512, timeout)
         read_flush(ep_in)
         return bytes(response)
     except usb.core.USBError as e:
-        print("USB read error:", e)
-        return None
+        logger.debug("USB read error: %s", e)
+        raise
 
 
 def delay_sync(dev):
@@ -936,35 +969,178 @@ class LcdCommTuringUSB(LcdComm):
     def __init__(self, com_port: str = "AUTO", display_width: int = 480, display_height: int = 1920,
                  update_queue: Optional[queue.Queue] = None):
         super().__init__(com_port, display_width, display_height, update_queue)
-        self.dev, self.dev_pid = find_usb_device()
-        self.display_width, self.display_height = PRODUCT_ID[self.dev_pid]
-        # Store the current screen state as an image that will be continuously updated and sent
-        self.current_state = Image.new("RGBA", (self.get_width(), self.get_height()), (0, 0, 0, 0))
+        self.dev = None
+        self.dev_pid = None
+        self._brightness_level = 25
+        self._reconnect_lock = threading.RLock()
+        self._reconnect_attempts = 0
+        # Evento de apagado: permite interrumpir los reintentos infinitos al cerrar la app.
+        self._shutdown = threading.Event()
+        self._in_reconnect_redraw = False
+
+        _set_conn_status(connected=False, reconnecting=True, message="Buscando pantalla USB...")
+        self._connect(initial=True)
+
+    def begin_shutdown(self):
+        """Señala que la app se está cerrando para no bloquearse esperando la pantalla."""
+        self._shutdown.set()
+
+    def _connect(self, initial=False):
+        """Busca y conecta la pantalla USB. Reintenta indefinidamente hasta conseguirlo."""
+        attempt = 0
+        while True:
+            if self._shutdown.is_set():
+                _set_conn_status(connected=False, reconnecting=False, message="Apagando")
+                return
+            try:
+                attempt += 1
+                self._reconnect_attempts = attempt
+                self.dev, self.dev_pid = find_usb_device()
+                self.display_width, self.display_height = PRODUCT_ID.get(self.dev_pid, (self.display_width, self.display_height))
+                # Store the current screen state as an image that will be continuously updated and sent
+                if not hasattr(self, 'current_state') or self.current_state is None:
+                    self.current_state = Image.new("RGBA", (self.get_width(), self.get_height()), (0, 0, 0, 0))
+                else:
+                    # Recreate state with correct size/orientation
+                    self.current_state = Image.new("RGBA", (self.get_width(), self.get_height()), (0, 0, 0, 0))
+
+                _set_conn_status(connected=True, reconnecting=False, message="Conectado")
+                logger.info("TUR_USB: pantalla conectada (pid=0x%04x, %dx%d)", self.dev_pid, self.display_width, self.display_height)
+                return
+            except usb.core.NoBackendError:
+                # No se puede recuperar sin libusb; esperar y seguir intentando por si cambia el entorno
+                if attempt == 1 or attempt % 30 == 0:
+                    logger.error("TUR_USB: libusb no disponible. Reintentando...")
+                _set_conn_status(connected=False, reconnecting=True, message="Error: libusb no disponible")
+                self._shutdown.wait(5)
+            except Exception as e:
+                if attempt == 1 or attempt % 10 == 0:
+                    logger.warning("TUR_USB: pantalla no encontrada (%s). Reintentando...", e)
+                _set_conn_status(connected=False, reconnecting=True, message="Reconectando pantalla USB...")
+                # Re-enumerar USB periódicamente para recuperar dispositivos "fantasma"
+                if attempt in (1, 3, 8) or attempt % 15 == 0:
+                    _rescan_usb_devices(self._shutdown)
+                self._shutdown.wait(2)
+
+    def _reinitialize_after_reconnect(self):
+        """Reinicializa la pantalla tras reconexión y restaura estado básico."""
+        try:
+            send_sync_command(self.dev)
+        except Exception:
+            pass
+        try:
+            # Restaurar brillo
+            self.SetBrightness(self._brightness_level)
+        except Exception:
+            pass
+        try:
+            # Restaurar orientación y limpiar estado para forzar redibujado completo
+            self.current_state = Image.new("RGBA", (self.get_width(), self.get_height()), (0, 0, 0, 0))
+        except Exception:
+            pass
+
+    def _handle_disconnect(self, err=None):
+        """Maneja desconexión: marca estado, reconecta y re-inicializa."""
+        if self._shutdown.is_set():
+            return
+        dev_before = self.dev
+        with self._reconnect_lock:
+            if self._shutdown.is_set():
+                return
+            # Si otro hilo ya reconectó, no repetir la operación.
+            if dev_before is not None and self.dev is not dev_before:
+                return
+
+            _set_conn_status(connected=False, reconnecting=True, message="Pantalla desconectada, reconectando...")
+            if err:
+                logger.warning("TUR_USB: comunicación perdida (%s). Intentando reconectar...", err)
+            else:
+                logger.warning("TUR_USB: comunicación perdida. Intentando reconectar...")
+
+            # Cerrar/release best-effort
+            try:
+                if self.dev is not None:
+                    usb.util.dispose_resources(self.dev)
+            except Exception:
+                pass
+            self.dev = None
+
+            # Reconectar indefinidamente
+            self._connect(initial=False)
+            if self._shutdown.is_set() or self.dev is None:
+                return
+            self._reinitialize_after_reconnect()
+
+            # Redibujar contenido estático (imágenes/textos) tras reconectar.
+            # La bandera evita que un fallo aquí vuelva a entrar en _handle_disconnect.
+            self._in_reconnect_redraw = True
+            try:
+                from library.display import display as global_display
+                global_display.display_static_images()
+                global_display.display_static_text()
+            except Exception as e:
+                logger.debug("TUR_USB: no se pudo redibujar contenido estático tras reconexión: %s", e)
+            finally:
+                self._in_reconnect_redraw = False
+
+            _set_conn_status(connected=True, reconnecting=False, message="Reconectado")
+
+    def _ensure_connected(self):
+        if self.dev is None:
+            self._handle_disconnect(RuntimeError("USB device is None"))
 
     def InitializeComm(self):
-        send_sync_command(self.dev)
+        while True:
+            try:
+                self._ensure_connected()
+                send_sync_command(self.dev)
+                _set_conn_status(connected=True, reconnecting=False, message="Conectado")
+                return
+            except Exception as e:
+                if self._shutdown.is_set():
+                    return
+                self._handle_disconnect(e)
 
     def Reset(self):
         # Do not enable the reset command for now on Turing USB models
-        # send_restart_device_command(self.dev)
         pass
 
     def Clear(self):
-        clear_image(self.dev)
+        while True:
+            try:
+                self._ensure_connected()
+                clear_image(self.dev)
+                return
+            except Exception as e:
+                if self._shutdown.is_set():
+                    return
+                self._handle_disconnect(e)
 
     def ScreenOff(self):
         # Turing USB models do not implement a "screen off" command (that we know of): use SetBrightness(0) instead
-        self.Clear()
+        try:
+            self.Clear()
+        except Exception:
+            pass
         self.SetBrightness(0)
 
     def ScreenOn(self):
         # Turing USB models do not implement a "screen off" command (that we know of): using SetBrightness() instead
-        self.SetBrightness()
+        self.SetBrightness(self._brightness_level)
 
     def SetBrightness(self, level: int = 25):
         assert 0 <= level <= 100, 'Brightness level must be [0-100]'
+        self._brightness_level = int(level)
         converted = int(level / 100 * 102)
-        send_brightness_command(self.dev, converted)
+        while True:
+            try:
+                self._ensure_connected()
+                send_brightness_command(self.dev, converted)
+                return
+            except Exception as e:
+                if self._shutdown.is_set():
+                    return
+                self._handle_disconnect(e)
 
     def SetOrientation(self, orientation: Orientation):
         self.orientation = orientation
@@ -986,6 +1162,10 @@ class LcdCommTuringUSB(LcdComm):
         if image_width != image.size[0] or image_height != image.size[1]:
             image = image.crop((0, 0, image_width, image_height))
 
+        # Ensure current_state exists and has correct size
+        if self.current_state is None or self.current_state.size != (self.get_width(), self.get_height()):
+            self.current_state = Image.new("RGBA", (self.get_width(), self.get_height()), (0, 0, 0, 0))
+
         # Paste new image over existing screen state
         self.current_state.paste(image, (x, y))
 
@@ -1000,4 +1180,13 @@ class LcdCommTuringUSB(LcdComm):
             base_image = self.current_state
 
         # Send image data (auto JPEG fallback when payload exceeds device limit)
-        send_pil_image_auto(self.dev, base_image, max_bytes=MAX_IMAGE_PAYLOAD_DEFAULT)
+        # If device is disconnected, block and reconnect until it works (infinite retry)
+        while True:
+            try:
+                self._ensure_connected()
+                send_pil_image_auto(self.dev, base_image, max_bytes=MAX_IMAGE_PAYLOAD_DEFAULT)
+                return
+            except Exception as e:
+                if self._shutdown.is_set() or self._in_reconnect_redraw:
+                    return
+                self._handle_disconnect(e)

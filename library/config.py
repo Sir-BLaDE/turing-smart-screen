@@ -80,6 +80,15 @@ def check_theme_compatible(display_size: str):
             os._exit(0)
 
 
+# GameHUD: parche de arranque USB (si está disponible)
+try:
+    import gamehud_usb_boot  # noqa: F401
+except Exception:
+    try:
+        from library import gamehud_usb_boot  # noqa: F401
+    except Exception:
+        pass
+
 # Load theme on import
 load_theme()
 

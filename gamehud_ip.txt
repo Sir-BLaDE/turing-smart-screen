@@ -1,0 +1,13 @@
+# GameHUD - qué IP se ve en el panel NET.
+# mode = public    IP pública de tu conexión, la que ve internet (consulta una API externa cada X minutos)   <- por defecto
+# mode = gateway   IP local del router (puerta de enlace, p. ej. 192.168.1.1)
+# 
+# Cuando mode=public y se usa IP_CACHE_ENABLED=yes, la primera llamada a api.ipify.org guarda el resultado
+# para X minutos. Después la pantalla muestra ese valor sin consultar cada vez (ahorra bandwidth y evita límites).
+# Al reiniciar el programa o apagar/encender el PC, se lee gamehud_ip.txt para restaurar las preferencias.
+# 
+# Si quieres que la IP pública se actualice automáticamente aunque haya caché, usa:
+#   - mode=refresh    cada vez consulta api.ipify.org sin caché (no recomendado con conexión lenta)
+mode = public
+IP_CACHE_ENABLED = yes
+IP_CACHE_DURATION = 600

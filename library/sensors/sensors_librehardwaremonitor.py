@@ -56,13 +56,10 @@ logger.debug("Found LibreHardwareMonitorLib %s" % ".".join([str(HIWORD(ms_file_v
                                                             str(LOWORD(ls_file_version))]))
 
 if ctypes.windll.shell32.IsUserAnAdmin() == 0:
-    logger.error(
-        "Program is not running as administrator. Please run with admin rights or choose another HW_SENSORS option in "
-        "config.yaml")
-    try:
-        sys.exit(0)
-    except:
-        os._exit(0)
+    msg = ("Program is not running as administrator. Please run with admin rights or choose another HW_SENSORS option "
+           "in config.yaml")
+    logger.error(msg)
+    raise PermissionError(msg)
 
 handle = Hardware.Computer()
 handle.IsCpuEnabled = True

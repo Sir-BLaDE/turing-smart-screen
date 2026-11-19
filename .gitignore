@@ -142,3 +142,26 @@ tmp
 
 version.txt
 external/LibreHardwareMonitor/LibreHardwareMonitorLib.sys
+
+# Runtime state / local GameHUD caches
+connection_status.json
+*.log
+gamehud_brightness.txt
+gamehud_fans.txt
+gamehud_fps.txt
+gamehud_ping.txt
+gamehud_probe.txt
+gamehud_ram.txt
+gamehud_voltages.txt
+gamehud_weather.txt
+library/config/
+
+# Old patch installer copies / backups / installation logs
+1install_gamehud.py
+1sensors_gamehud.py
+install_gamehud - copia.py
+library/sensors_gamehud.py
+library/sensors/*.bak
+gamehud_final.py
+GAMEHUD_V12_SUMMARY.txt
+MAZINGER_INSTALLATION_COMPLETE.txt

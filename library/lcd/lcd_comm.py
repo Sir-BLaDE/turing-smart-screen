@@ -91,6 +91,13 @@ class LcdComm(ABC):
             Tuple[int, int, int, int]  # value=(left, top, right, bottom) actually drawn
         ] = {}
 
+        # Evento de apagado: interrumpe los reintentos infinitos al cerrar la aplicación.
+        self._shutdown = threading.Event()
+
+    def begin_shutdown(self):
+        """Señala que la app se está cerrando para no bloquearse esperando el puerto serie."""
+        self._shutdown.set()
+
     def get_width(self) -> int:
         if self.orientation == Orientation.PORTRAIT or self.orientation == Orientation.REVERSE_PORTRAIT:
             return self.display_width
@@ -103,30 +110,61 @@ class LcdComm(ABC):
         else:
             return self.display_width
 
-    def openSerial(self):
+    def openSerial(self, infinite_retry: bool = False):
         # self.com_port is kept as configured ("AUTO" or a port name): on AUTO the port is
         # detected again at every attempt, since it can change while the screen resets.
-        for attempt in range(1, SERIAL_OPEN_ATTEMPTS + 1):
+        attempt = 0
+        while True:
+            if self._shutdown.is_set():
+                return
+            attempt += 1
+            max_display = "∞" if infinite_retry else str(SERIAL_OPEN_ATTEMPTS)
             com_port = self.com_port
             if com_port == 'AUTO':
                 com_port = self.auto_detect_com_port()
                 if not com_port:
-                    logger.warning(
-                        f"Cannot find COM port automatically, retrying ({attempt}/{SERIAL_OPEN_ATTEMPTS})")
-                    time.sleep(SERIAL_OPEN_RETRY_DELAY)
+                    if attempt == 1 or attempt % 10 == 0 or (not infinite_retry and attempt == SERIAL_OPEN_ATTEMPTS):
+                        logger.warning(
+                            f"Cannot find COM port automatically, retrying ({attempt}/{max_display})")
+                    if not infinite_retry and attempt >= SERIAL_OPEN_ATTEMPTS:
+                        break
+                    if attempt in (1, 3, 8) or attempt % 15 == 0:
+                        # Intentar re-enumerar USB en Windows por si la pantalla reaparece
+                        if platform.system() == "Windows":
+                            try:
+                                import subprocess
+                                subprocess.run(["pnputil", "/scan-devices"], capture_output=True, timeout=30,
+                                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                            except Exception:
+                                pass
+                    self._shutdown.wait(SERIAL_OPEN_RETRY_DELAY)
                     continue
                 logger.debug(f"Auto detected COM port: {com_port}")
             else:
-                logger.debug(f"Static COM port: {com_port}")
+                if attempt == 1 or attempt % 10 == 0:
+                    logger.debug(f"Static COM port: {com_port}")
 
             try:
                 self.lcd_serial = serial.Serial(com_port, 115200, timeout=1, rtscts=True)
                 return
             except Exception as e:
-                logger.warning(
-                    f"Cannot open COM port {com_port}: {e} - retrying ({attempt}/{SERIAL_OPEN_ATTEMPTS})")
-                time.sleep(SERIAL_OPEN_RETRY_DELAY)
+                if attempt == 1 or attempt % 10 == 0 or (not infinite_retry and attempt == SERIAL_OPEN_ATTEMPTS):
+                    logger.warning(
+                        f"Cannot open COM port {com_port}: {e} - retrying ({attempt}/{max_display})")
+                if not infinite_retry and attempt >= SERIAL_OPEN_ATTEMPTS:
+                    break
+                if attempt in (1, 3, 8) or attempt % 15 == 0:
+                    if platform.system() == "Windows":
+                        try:
+                            import subprocess
+                            subprocess.run(["pnputil", "/scan-devices"], capture_output=True, timeout=30,
+                                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                        except Exception:
+                            pass
+                self._shutdown.wait(SERIAL_OPEN_RETRY_DELAY)
 
+        if self._shutdown.is_set():
+            return
         logger.error(
             f"Cannot open COM port after {SERIAL_OPEN_ATTEMPTS} attempts. If the screen is connected, run "
             f"Configuration again and select the COM port manually")
@@ -167,40 +205,52 @@ class LcdComm(ABC):
             self.WriteLine(line)
 
     def WriteLine(self, line: bytes):
-        try:
-            self.serial_write(line)
-            if platform.system() == "Darwin":
-                # macOS needs the serial buffer to be flushed regularly to avoid bitmap corruption on the display
-                # See https://github.com/mathoudebine/turing-smart-screen-python/issues/7
-                self.lcd_serial.flush()
-        except serial.SerialTimeoutException:
-            # We timed-out trying to write to our device, slow things down.
-            logger.warning("(Write line) Too fast! Slow down!")
-        except serial.SerialException:
-            # Error writing data to device: close and reopen serial port, try to write again
-            logger.error(
-                "SerialException: Failed to send serial data to device. Closing and reopening COM port before retrying once.")
-            self.closeSerial()
-            time.sleep(1)
-            self.openSerial()
-            self.serial_write(line)
+        while True:
+            try:
+                self.serial_write(line)
+                if platform.system() == "Darwin":
+                    # macOS needs the serial buffer to be flushed regularly to avoid bitmap corruption on the display
+                    # See https://github.com/mathoudebine/turing-smart-screen-python/issues/7
+                    self.lcd_serial.flush()
+                return
+            except serial.SerialTimeoutException:
+                # We timed-out trying to write to our device, slow things down.
+                logger.warning("(Write line) Too fast! Slow down!")
+                time.sleep(0.1)
+                return
+            except serial.SerialException as e:
+                # Error writing data to device: close and reopen serial port, retry indefinitely
+                logger.error("SerialException: Failed to send serial data to device (%s). Reconnecting...", e)
+                try:
+                    self.closeSerial()
+                except Exception:
+                    pass
+                if self._shutdown.is_set():
+                    return
+                self._shutdown.wait(1)
+                self.openSerial(infinite_retry=True)
 
     def ReadData(self, readSize: int):
-        try:
-            response = self.serial_read(readSize)
-            # logger.debug("Received: [{}]".format(str(response, 'utf-8')))
-            return response
-        except serial.SerialTimeoutException:
-            # We timed-out trying to read from our device, slow things down.
-            logger.warning("(Read data) Too fast! Slow down!")
-        except serial.SerialException:
-            # Error writing data to device: close and reopen serial port, try to read again
-            logger.error(
-                "SerialException: Failed to read serial data from device. Closing and reopening COM port before retrying once.")
-            self.closeSerial()
-            time.sleep(1)
-            self.openSerial()
-            return self.serial_read(readSize)
+        while True:
+            try:
+                response = self.serial_read(readSize)
+                # logger.debug("Received: [{}]".format(str(response, 'utf-8')))
+                return response
+            except serial.SerialTimeoutException:
+                # We timed-out trying to read from our device, slow things down.
+                logger.warning("(Read data) Too fast! Slow down!")
+                return b""
+            except serial.SerialException as e:
+                # Error reading data from device: close and reopen serial port, retry indefinitely
+                logger.error("SerialException: Failed to read serial data from device (%s). Reconnecting...", e)
+                try:
+                    self.closeSerial()
+                except Exception:
+                    pass
+                if self._shutdown.is_set():
+                    return b""
+                self._shutdown.wait(1)
+                self.openSerial(infinite_retry=True)
 
     @staticmethod
     def auto_detect_com_port() -> Optional[str]:

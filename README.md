@@ -8,6 +8,27 @@
 > * for Turing Smart Screen, use the official forum here: http://discuz.turzx.com/
 > * for other smart screens, contact your reseller
 
+## Build personalizada (Sir-BLaDE) - GameHUD / TURZX 8"
+
+Esta rama contiene la version personalizada para **TURZX 8" (1280x800, `REVISION: TUR_USB`)** con:
+
+- Tema **GameHUD v12** integrado y configurador con interfaz oscura.
+- **Reconexion USB infinita**: si se pierde el puerto, el proceso sigue en la bandeja, reenumera, reapare el dispositivo, reinicializa y redibuja automaticamente.
+- **Indicador de conexion** en el menu del tray y en el configurador.
+- **`HW_SENSORS: AUTO` sin administrador**: usa los sensores de Python cuando no hay privilegios elevados (el modo `LHM` directo sigue requiriendo admin).
+- Sensores GameHUD ampliados (FPS/RTSS, voltajes, relojes, IP, weather, etc.) y cache de IP.
+
+### Uso rapido (Windows)
+
+1. Descarga el ZIP de la ultima release y descomprimelo (por ejemplo en `%LOCALAPPDATA%\Programs\Turing System Monitor`).
+2. Ejecuta `configure.exe` y verifica `COM_PORT: AUTO`, `REVISION: TUR_USB`, `THEME: GameHUD`, `HW_SENSORS: AUTO`.
+3. Ejecuta `main.exe`. Se queda en la bandeja y el icono muestra el estado de conexion.
+
+### Notas
+
+- Si existe una tarea programada antigua llamada `\GameHUD` que apunta a una ruta eliminada, borrala como administrador: `schtasks /Delete /TN "GameHUD" /F`.
+- Para validar la reconexion, desconecta y vuelve a conectar el cable USB mientras `main.exe` sigue en la bandeja.
+
 ![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black) ![Windows](https://img.shields.io/badge/Windows%2010%2F11-0078D6?style=for-the-badge&logoColor=white&logo=data:image/svg%2bxml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+V2luZG93czwvdGl0bGU+PHBhdGggZmlsbCA9ICIjRkZGRkZGIiBkPSJNMCwwSDExLjM3N1YxMS4zNzJIMFpNMTIuNjIzLDBIMjRWMTEuMzcySDEyLjYyM1pNMCwxMi42MjNIMTEuMzc3VjI0SDBabTEyLjYyMywwSDI0VjI0SDEyLjYyMyIvPjwvc3ZnPg==) [![macOS](https://img.shields.io/badge/mac%20os%20(⚠️major%20bug)-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mathoudebine/turing-smart-screen-python/issues/7) ![Raspberry Pi](https://img.shields.io/badge/Raspberry%20Pi-A22846?style=for-the-badge&logo=Raspberry%20Pi&logoColor=white) ![Python](https://img.shields.io/badge/Python-3.X-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54) [![Licence](https://img.shields.io/github/license/mathoudebine/turing-smart-screen-python?style=for-the-badge)](./LICENSE)
   
 A Python system monitor program and an abstraction library for **small IPS USB-C displays.**    

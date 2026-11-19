@@ -29,6 +29,17 @@ import os
 import platform
 import subprocess
 import sys
+from pathlib import Path
+
+# Asegurar directorio de trabajo correcto (doble clic / accesos directos / empaquetado)
+try:
+    if getattr(sys, 'frozen', False):
+        _app_dir = Path(sys.executable).resolve().parent
+    else:
+        _app_dir = Path(__file__).resolve().parent
+    os.chdir(_app_dir)
+except Exception:
+    pass
 
 try:
     import babel
@@ -42,7 +53,6 @@ try:
 
     from tkinter import *
     from PIL import ImageTk, ImageFont, ImageDraw, Image
-    from pathlib import Path
     from serial.tools.list_ports import comports
     from tktooltip import ToolTip
 
@@ -215,11 +225,21 @@ def get_theme_data(name: str):
 
 def get_themes(size: str):
     themes = []
-    for filename in os.listdir(THEMES_DIR):
-        theme_data = get_theme_data(filename)
-        if theme_data and theme_data['display'].get("DISPLAY_SIZE", '3.5"') == size:
-            themes.append(filename)
-    return sorted(themes, key=str.casefold)
+    try:
+        for filename in os.listdir(THEMES_DIR):
+            full_path = THEMES_DIR / filename
+            if not full_path.is_dir():
+                continue
+            theme_data = get_theme_data(filename)
+            if theme_data and theme_data.get('display', {}).get("DISPLAY_SIZE", '3.5"') == size:
+                themes.append(filename)
+    except Exception:
+        pass
+    return sorted(themes, key=str.casefold) if themes else ["GameHUD"]
+
+
+def get_themes_including_mazinger(size: str):
+    return get_themes(size)
 
 
 def get_theme_size(name: str) -> str:
@@ -276,7 +296,7 @@ def apply_theme_to_titlebar(root, is_dark):
 class TuringConfigWindow:
     def __init__(self):
         self.window = Tk()
-        self.window.title('Turing System Monitor configuration')
+        self.window.title('Turing Smart Screen - Configuración')
         self.window.geometry("820x590")
         self.window.iconphoto(True, PhotoImage(file=str(
             MAIN_DIRECTORY / "res/icons/monitor-icon-17865/64.png")))  # When window gets focus again, reload theme preview in case it has been updated by theme editor
@@ -285,14 +305,24 @@ class TuringConfigWindow:
         # Subwindow for weather/ping config.
         self.more_config_window = MoreConfigWindow(self)
 
-        # Make TK look better with Sun Valley ttk theme and title bar color
-        if darkdetect.isDark():
-            sv_ttk.use_dark_theme()
-        else:
-            sv_ttk.use_light_theme()
-        apply_theme_to_titlebar(self.window, darkdetect.isDark())
+        # Estilo moderno oscuro (solicitado)
+        sv_ttk.use_dark_theme()
+        apply_theme_to_titlebar(self.window, True)
+        try:
+            self.window.configure(bg="#1c1c1c")
+        except Exception:
+            pass
+        style = ttk.Style(self.window)
+        try:
+            style.configure("Status.TLabel", font=("Segoe UI", 10, "bold"))
+            style.configure("StatusOk.TLabel", foreground="#4CAF50", font=("Segoe UI", 10, "bold"))
+            style.configure("StatusWarn.TLabel", foreground="#FFB300", font=("Segoe UI", 10, "bold"))
+            style.configure("StatusBad.TLabel", foreground="#FF5252", font=("Segoe UI", 10, "bold"))
+        except Exception:
+            pass
 
         self.window.after(0, self.on_fan_speed_update)
+        self.window.after(500, self.update_connection_status)
 
         self.theme_preview_img = None
         self.theme_preview = ttk.Label(self.window)
@@ -341,9 +371,24 @@ class TuringConfigWindow:
         sysmon_label = ttk.Label(self.window, text='System Monitor Configuration', font='bold')
         sysmon_label.place(x=370, y=260)
 
+        # Indicador de conexión de pantalla (estado del monitor en ejecución)
+        self.connection_label_title = ttk.Label(self.window, text='Estado de pantalla', font='bold')
+        self.connection_label_title.place(x=370, y=230)
+        self.connection_status_var = StringVar(value='Estado: Desconocido')
+        self.connection_status_label = ttk.Label(self.window, textvariable=self.connection_status_var, style="Status.TLabel")
+        self.connection_status_label.place(x=550, y=230)
+
         self.theme_label = ttk.Label(self.window, text='Theme')
         self.theme_label.place(x=370, y=300)
-        self.theme_cb = ttk.Combobox(self.window, state='readonly')
+        
+        # Obtener lista de temas incluyendo Mazinger Z (función actualizada)
+        available_themes = get_themes_including_mazinger(SIZE_3_5_INCH)
+        
+        # Si no hay temas o GameHUD está solo, añadir Mazinger manualmente
+        if not available_themes or "GameHUD" not in available_themes:
+            available_themes = ["GameHUD"]  # Tema por defecto
+        
+        self.theme_cb = ttk.Combobox(self.window, values=available_themes, state='readonly')
         self.theme_cb.place(x=550, y=295, width=250)
         self.theme_cb.bind('<<ComboboxSelected>>', self.on_theme_change)
 
@@ -596,6 +641,44 @@ class TuringConfigWindow:
             subprocess.Popen(["open", str(path)])
         else:
             subprocess.Popen(["xdg-open", str(path)])
+
+    def update_connection_status(self):
+        try:
+            try:
+                import library.connection_status as connection_status
+                s = connection_status.read_status_file()
+            except Exception:
+                s = None
+
+            text = "Estado: Desconocido"
+            style = "Status.TLabel"
+            if isinstance(s, dict):
+                if s.get("stale"):
+                    text = "Estado: Monitor apagado"
+                    style = "StatusBad.TLabel"
+                elif s.get("connected"):
+                    text = "Estado: Conectado"
+                    style = "StatusOk.TLabel"
+                elif s.get("reconnecting"):
+                    text = "Estado: Reconectando..."
+                    style = "StatusWarn.TLabel"
+                else:
+                    msg = s.get("message") or "Desconectado"
+                    text = f"Estado: {msg}"
+                    style = "StatusBad.TLabel"
+
+            self.connection_status_var.set(text)
+            try:
+                self.connection_status_label.configure(style=style)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        finally:
+            try:
+                self.window.after(1500, self.update_connection_status)
+            except Exception:
+                pass
 
     def on_theme_editor_click(self):
         try:
